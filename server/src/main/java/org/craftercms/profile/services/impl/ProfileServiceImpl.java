@@ -20,7 +20,6 @@ import java.io.ByteArrayInputStream;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
@@ -37,6 +36,7 @@ import org.apache.commons.collections4.Predicate;
 import org.apache.commons.io.FileExistsException;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringEscapeUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.bson.types.ObjectId;
 import org.craftercms.commons.collections.IterableUtils;
@@ -80,6 +80,13 @@ import org.craftercms.profile.repositories.ProfileRepository;
 import org.craftercms.profile.services.VerificationService;
 import org.craftercms.profile.utils.db.ProfileUpdater;
 import org.springframework.beans.factory.annotation.Required;
+
+import static java.util.Arrays.asList;
+import static java.util.stream.Collectors.toList;
+import static org.craftercms.profile.api.ProfileConstants.ATTRIBUTE_TYPE_KEY;
+import static org.craftercms.profile.api.ProfileConstants.ATTRIBUTE_TYPE_LARGE_TEXT;
+import static org.craftercms.profile.api.ProfileConstants.ATTRIBUTE_TYPE_STRING_LIST;
+import static org.craftercms.profile.api.ProfileConstants.ATTRIBUTE_TYPE_TEXT;
 
 /**
  * Default implementation of {@link org.craftercms.profile.api.services.ProfileService}.
@@ -131,6 +138,9 @@ public class ProfileServiceImpl implements ProfileService {
     public static final Pattern QUERY_WHERE_PATTERN = Pattern.compile("['\"]?\\$where['\"]?\\s*:");
     public static final String QUERY_ATTRIBUTE_PATTERN_FORMAT = "['\"]?attributes\\.%s(\\.[^'\":]+)?['\"]?\\s*:";
     public static final String QUERY_FINAL_FORMAT = "{$and: [{tenant: '%s'}, %s]}";
+
+    public static final List<String> CLEANSE_SUPPORTED_TYPES =
+        asList(ATTRIBUTE_TYPE_TEXT, ATTRIBUTE_TYPE_LARGE_TEXT, ATTRIBUTE_TYPE_STRING_LIST);
 
     protected PermissionEvaluator<AccessToken, String> tenantPermissionEvaluator;
     protected PermissionEvaluator<AccessToken, AttributeDefinition> attributePermissionEvaluator;
@@ -263,6 +273,10 @@ public class ProfileServiceImpl implements ProfileService {
                 profile.getAttributes().putAll(attributes);
             }
 
+            if (tenant.isCleanseAttributes()) {
+                cleanseAttributes(tenant, profile.getAttributes());
+            }
+
             profileRepository.insert(profile);
 
             logger.debug(LOG_KEY_PROFILE_CREATED, profile);
@@ -312,6 +326,10 @@ public class ProfileServiceImpl implements ProfileService {
                 rejectAttributesIfActionNotAllowed(tenantName, attributes.keySet(),
                                                    AttributeAction.WRITE_ATTRIBUTE);
 
+                Tenant tenant = getTenant(tenantName);
+                if (tenant.isCleanseAttributes()) {
+                    cleanseAttributes(tenant, attributes);
+                }
                 profileUpdater.addAttributes(attributes);
             }
         }, attributesToReturn);
@@ -319,6 +337,28 @@ public class ProfileServiceImpl implements ProfileService {
         logger.debug(LOG_KEY_PROFILE_UPDATED, profile);
 
         return profile;
+    }
+
+    protected void cleanseAttributes(Tenant tenant, Map<String, Object> attributes) {
+        List<AttributeDefinition> supportedAttributes = tenant.getAttributeDefinitions().stream()
+            .filter(definition ->
+                CLEANSE_SUPPORTED_TYPES.contains(definition.getMetadata().get(ATTRIBUTE_TYPE_KEY).toString()))
+            .collect(toList());
+        supportedAttributes.forEach(attribute -> attributes.compute(attribute.getName(),
+            (key, value) -> escapeValue(value, attribute.getMetadata().get(ATTRIBUTE_TYPE_KEY).toString())));
+    }
+
+    @SuppressWarnings("unchecked")
+    protected Object escapeValue(Object value, String type) {
+        switch (type) {
+            case ATTRIBUTE_TYPE_TEXT:
+            case ATTRIBUTE_TYPE_LARGE_TEXT:
+                return StringEscapeUtils.escapeHtml4(value.toString());
+            case ATTRIBUTE_TYPE_STRING_LIST:
+                return ((List<String>) value).stream().map(StringEscapeUtils::escapeHtml4).collect(toList());
+            default:
+                throw new IllegalArgumentException("Attribute of type " + type + " can't be escaped");
+        }
     }
 
     @Override
@@ -957,7 +997,7 @@ public class ProfileServiceImpl implements ProfileService {
 
     public void setValidAttachmentMimeTypes(final String validAttachmentMimeTypes) {
         if(StringUtils.isNotBlank(validAttachmentMimeTypes)){
-            this.validAttachmentMimeTypes=Arrays.asList(validAttachmentMimeTypes.split(","));
+            this.validAttachmentMimeTypes= asList(validAttachmentMimeTypes.split(","));
         }else{
             this.validAttachmentMimeTypes = Collections.EMPTY_LIST;
         }
